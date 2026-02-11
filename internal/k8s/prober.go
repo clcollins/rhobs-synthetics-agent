@@ -411,6 +411,11 @@ func (m *BlackBoxProberManager) buildPrometheusResource() *promv1.Prometheus {
 						"rhobs.monitoring/managed-by": SyntheticsAgentManagedByValue,
 					},
 				},
+				ServiceMonitorSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app.kubernetes.io/component": "synthetics-agent",
+					},
+				},
 				RemoteWrite: []promv1.RemoteWriteSpec{
 					{
 						URL: m.remoteWriteURL,
