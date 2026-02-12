@@ -27,9 +27,9 @@ objects:
     - apiGroups: ["monitoring.rhobs"]
       resources: ["probes"]
       verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-    # Access to Prometheus CRDs (monitoring.rhobs/v1)
+    # Access to Prometheus and ServiceMonitor CRDs (monitoring.rhobs/v1)
     - apiGroups: ["monitoring.rhobs"]
-      resources: ["prometheuses"]
+      resources: ["prometheuses", "servicemonitors"]
       verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
     # Access to Probe CRDs (monitoring.coreos.com/v1) - alternative API group
     - apiGroups: ["monitoring.coreos.com"]
@@ -244,6 +244,61 @@ objects:
         path: /metrics
         interval: 30s
         scrapeTimeout: 10s
+# ServiceMonitor for COO-managed Prometheus (monitoring.rhobs API group)
+# This enables the local Prometheus (created by the agent) to scrape
+# agent health metrics and remote-write them to the RHOBS cell.
+- apiVersion: monitoring.rhobs/v1
+  kind: ServiceMonitor
+  metadata:
+    name: ${APPLICATION_NAME}-health
+    namespace: ${NAMESPACE}
+    labels:
+      app.kubernetes.io/component: synthetics-agent
+      app.kubernetes.io/instance: rhobs
+      app.kubernetes.io/name: synthetics-agent
+      app.kubernetes.io/part-of: rhobs
+  spec:
+    selector:
+      matchLabels:
+        app.kubernetes.io/component: synthetics-agent
+    endpoints:
+      - port: http-metrics
+        path: /metrics
+        interval: 30s
+# Role for Prometheus service discovery (pods, services, endpoints)
+# Required for the agent-managed Prometheus to scrape ServiceMonitor targets.
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: ${APPLICATION_NAME}-prometheus
+    namespace: ${NAMESPACE}
+    labels:
+      app.kubernetes.io/component: synthetics-agent
+      app.kubernetes.io/instance: rhobs
+      app.kubernetes.io/name: synthetics-agent
+      app.kubernetes.io/part-of: rhobs
+  rules:
+    - apiGroups: [""]
+      resources: ["services", "endpoints", "pods"]
+      verbs: ["get", "list", "watch"]
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: ${APPLICATION_NAME}-prometheus
+    namespace: ${NAMESPACE}
+    labels:
+      app.kubernetes.io/component: synthetics-agent
+      app.kubernetes.io/instance: rhobs
+      app.kubernetes.io/name: synthetics-agent
+      app.kubernetes.io/part-of: rhobs
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: ${APPLICATION_NAME}-prometheus
+  subjects:
+    - kind: ServiceAccount
+      name: default
+      namespace: ${NAMESPACE}
 parameters:
 - name: APPLICATION_NAME
   displayName: Application Name
