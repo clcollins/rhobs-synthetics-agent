@@ -390,6 +390,16 @@ func (m *BlackBoxProberManager) PrometheusNeedsRecreation(ctx context.Context) (
 		}
 	}
 
+	// Check if OAuth2 config matches expected state
+	if len(currentPrometheus.Spec.RemoteWrite) > 0 {
+		hasOAuth2 := currentPrometheus.Spec.RemoteWrite[0].OAuth2 != nil
+		needsOAuth2 := m.oidcConfig != nil && m.oidcConfig.ClientID != ""
+		if hasOAuth2 != needsOAuth2 {
+			logger.Infof("Prometheus OAuth2 config mismatch: has=%v, needs=%v", hasOAuth2, needsOAuth2)
+			return true, nil
+		}
+	}
+
 	return false, nil
 }
 
