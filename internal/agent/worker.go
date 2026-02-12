@@ -110,6 +110,14 @@ func NewWorker(cfg *Config) (*Worker, error) {
 				MemoryLimits:   cfg.Prometheus.MemoryLimits,
 			}
 			proberManagerConfig.ManagedByOperator = cfg.Prometheus.ManagedByOperator
+			// Pass OIDC credentials for Prometheus remote write OAuth2 authentication
+			if cfg.OIDCClientID != "" && cfg.OIDCClientSecret != "" && cfg.OIDCIssuerURL != "" {
+				proberManagerConfig.OIDC = &k8s.OIDCConfig{
+					ClientID:     cfg.OIDCClientID,
+					ClientSecret: cfg.OIDCClientSecret,
+					IssuerURL:    cfg.OIDCIssuerURL,
+				}
+			}
 		} else {
 			// Default values when config is nil
 			proberManagerConfig.ManagedByOperator = "observability-operator"
@@ -535,6 +543,12 @@ func (w *Worker) processPrometheus(ctx context.Context, shutdownChan chan struct
 	if w.prometheusManager == nil {
 		logger.Debug("skipping prometheus reconciliation - prometheus manager is nil")
 		return nil
+	}
+
+	// Ensure OIDC secret exists before reconciling Prometheus (needed for OAuth2 remote write)
+	if err := w.prometheusManager.EnsureOIDCSecret(ctx); err != nil {
+		logger.Errorf("failed to ensure OIDC secret: %v", err)
+		// Non-fatal: continue with Prometheus reconciliation
 	}
 
 	logger.Info("reconciling prometheus instance")

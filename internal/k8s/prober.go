@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -37,6 +38,8 @@ type PrometheusManager interface {
 	DeletePrometheus(ctx context.Context) (err error)
 	// PrometheusNeedsRecreation checks if the Prometheus instance needs to be deleted and recreated
 	PrometheusNeedsRecreation(ctx context.Context) (needsRecreation bool, err error)
+	// EnsureOIDCSecret creates or updates the OIDC credentials Secret for Prometheus remote write
+	EnsureOIDCSecret(ctx context.Context) error
 }
 
 const (
@@ -82,6 +85,15 @@ type BlackBoxProberManager struct {
 	managedByOperator string
 	// prometheusAPIGroup stores the detected API group for Prometheus resources ("monitoring.rhobs" or "monitoring.coreos.com")
 	prometheusAPIGroup string
+	// oidcConfig holds OIDC credentials for Prometheus remote write OAuth2 authentication
+	oidcConfig *OIDCConfig
+}
+
+// OIDCConfig holds OIDC credentials for remote write OAuth2 authentication
+type OIDCConfig struct {
+	ClientID     string
+	ClientSecret string
+	IssuerURL    string
 }
 
 // PrometheusResourceConfig holds the resource configuration for Prometheus pods
@@ -101,6 +113,7 @@ type BlackBoxProberManagerConfig struct {
 	RemoteWriteTenant   string
 	PrometheusResources PrometheusResourceConfig
 	ManagedByOperator   string
+	OIDC                *OIDCConfig
 }
 
 // NewBlackBoxProberManager creates a new BlackBoxProberManager with the provided configuration
@@ -134,6 +147,7 @@ func NewBlackBoxProberManager(config BlackBoxProberManagerConfig) (*BlackBoxProb
 		managedByOperator:   managedByOperator,
 		kubeClient:          client.DynamicClient(),
 		fullClient:          client,
+		oidcConfig:          config.OIDC,
 	}
 
 	// Detect which Prometheus API group is available
@@ -416,14 +430,7 @@ func (m *BlackBoxProberManager) buildPrometheusResource() *promv1.Prometheus {
 						"app.kubernetes.io/component": "synthetics-agent",
 					},
 				},
-				RemoteWrite: []promv1.RemoteWriteSpec{
-					{
-						URL: m.remoteWriteURL,
-						Headers: map[string]string{
-							"THANOS-TENANT": m.remoteWriteTenant,
-						},
-					},
-				},
+				RemoteWrite: m.buildRemoteWriteSpecs(),
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    parseResourceQuantity(m.prometheusResources.CPURequests),
@@ -437,6 +444,86 @@ func (m *BlackBoxProberManager) buildPrometheusResource() *promv1.Prometheus {
 			},
 		},
 	}
+}
+
+const (
+	// oidcSecretName is the name of the Secret holding OIDC credentials for Prometheus remote write
+	oidcSecretName = "synthetics-agent-oidc"
+)
+
+// buildRemoteWriteSpecs constructs the remote write configuration for the Prometheus CR.
+// When OIDC credentials are available, it configures OAuth2 authentication.
+func (m *BlackBoxProberManager) buildRemoteWriteSpecs() []promv1.RemoteWriteSpec {
+	spec := promv1.RemoteWriteSpec{
+		URL: m.remoteWriteURL,
+		Headers: map[string]string{
+			"THANOS-TENANT": m.remoteWriteTenant,
+		},
+	}
+
+	if m.oidcConfig != nil && m.oidcConfig.ClientID != "" {
+		tokenURL := m.oidcConfig.IssuerURL
+		if !strings.HasSuffix(tokenURL, "/token") {
+			tokenURL = strings.TrimSuffix(tokenURL, "/") + "/token"
+		}
+		spec.OAuth2 = &promv1.OAuth2{
+			ClientID: promv1.SecretOrConfigMap{
+				Secret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: oidcSecretName},
+					Key:                  "client-id",
+				},
+			},
+			ClientSecret: corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: oidcSecretName},
+				Key:                  "client-secret",
+			},
+			TokenURL: tokenURL,
+			Scopes:   []string{"profile"},
+		}
+	}
+
+	return []promv1.RemoteWriteSpec{spec}
+}
+
+// EnsureOIDCSecret creates or updates the OIDC credentials Secret for Prometheus remote write.
+func (m *BlackBoxProberManager) EnsureOIDCSecret(ctx context.Context) error {
+	if m.oidcConfig == nil || m.oidcConfig.ClientID == "" {
+		return nil
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      oidcSecretName,
+			Namespace: m.namespace,
+		},
+		StringData: map[string]string{
+			"client-id":     m.oidcConfig.ClientID,
+			"client-secret": m.oidcConfig.ClientSecret,
+		},
+	}
+
+	unstructuredSecret, err := convertToUnstructured(secret)
+	if err != nil {
+		return fmt.Errorf("failed to convert secret to unstructured: %w", err)
+	}
+
+	_, err = m.kubeClient.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(m.namespace).Get(ctx, oidcSecretName, metav1.GetOptions{})
+	if err != nil {
+		if kerr.IsNotFound(err) {
+			_, err = m.kubeClient.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(m.namespace).Create(ctx, unstructuredSecret, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to create OIDC secret: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to get OIDC secret: %w", err)
+	}
+
+	_, err = m.kubeClient.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(m.namespace).Update(ctx, unstructuredSecret, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update OIDC secret: %w", err)
+	}
+	return nil
 }
 
 // parseResourceQuantity safely parses a resource quantity string
