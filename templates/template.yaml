@@ -47,6 +47,10 @@ objects:
     - apiGroups: [""]
       resources: ["services"]
       verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    # Access to manage Secrets for OIDC credentials (Prometheus remote write OAuth2)
+    - apiGroups: [""]
+      resources: ["secrets"]
+      verbs: ["get", "create", "update"]
     # Access to read existing CRDs to detect which API group is available
     - apiGroups: ["apiextensions.k8s.io"]
       resources: ["customresourcedefinitions"]
